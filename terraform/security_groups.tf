@@ -26,8 +26,8 @@ resource "aws_security_group" "alb" {
     Name = "${var.project_name}-alb-sg"
   }
 }
-resource "aws_security_group" "ec2" {
-  name   = "${var.project_name}-ec2-sg"
+resource "aws_security_group" "launch_template" {
+  name   = "${var.project_name}-launchTemplate-sg"
   vpc_id = aws_vpc.main.id
 
   ingress {
@@ -45,7 +45,7 @@ resource "aws_security_group" "ec2" {
   }
 
   tags = {
-    Name = "${var.project_name}-ec2-sg"
+    Name = "${var.project_name}-launchTemplate-sg"
   }
 }
 resource "aws_security_group" "rds" {
@@ -56,7 +56,7 @@ resource "aws_security_group" "rds" {
     from_port       = 5432
     to_port         = 5432
     protocol        = "tcp"
-    security_groups = [aws_security_group.ec2.id]
+    security_groups = [aws_security_group.launch_template.id]
   }
 
   egress {

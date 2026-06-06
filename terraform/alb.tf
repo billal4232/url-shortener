@@ -25,12 +25,6 @@ resource "aws_lb_target_group" "alb_tg" {
     interval            = 30
 }
 }
-resource "aws_lb_target_group_attachment" "tg_attachment" {
-  target_group_arn = aws_lb_target_group.alb_tg.arn
-  target_id        = aws_instance.main.id 
-  port             = 5000
-}
-
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.main.arn
   port              = "80"

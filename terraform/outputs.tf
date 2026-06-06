@@ -6,8 +6,8 @@ output "app_url" {
   value = "https://app.${var.domain_name}"
 }
 
-output "ec2_instance_id" {
-  value = aws_instance.main.id
+output "asg_name" {
+  value = aws_autoscaling_group.main.name
 }
 
 output "rds_endpoint" {
