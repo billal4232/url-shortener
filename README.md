@@ -67,7 +67,8 @@ url-shortener/
 ├── alb.tf               # ALB, target group, listeners
 ├── acm.tf               # ACM certificate
 ├── route53.tf           # DNS records, cert validation
-├── ec2.tf               # EC2, IAM role, instance profile
+├── iam.tf               # IAM role, policy attachments, instance profile
+├── ec2.tf               # EC2 instance, user data
 ├── rds.tf               # RDS instance, subnet group
 ├── ssm.tf               # SSM parameters for DB credentials
 ├── s3.tf                # S3 bucket, VPC gateway endpoint
@@ -121,8 +122,10 @@ curl -X POST https://app.limonlab.online/shorten \
   -H "Content-Type: application/json" \
   -d '{"url": "https://www.google.com"}'
 
-# Test redirect (use short_code from above response)
-curl -L https://app.limonlab.online/<short_code>
+# Test redirect — open in browser
+# Copy short_code from response above and visit:
+# https://app.limonlab.online/<short_code>
+# Browser redirects automatically to the original URL
 ```
 
 ---
