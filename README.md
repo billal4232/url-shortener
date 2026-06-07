@@ -1,6 +1,6 @@
 # URL Shortener — Production AWS Infrastructure
 
-A production-grade URL shortener built on AWS, similar to bit.ly. Built in three versions as part of a hands-on DevOps portfolio.
+A production-grade URL shortener built on AWS, similar to bit.ly. Built in multiple versions as part of a hands-on DevOps portfolio.
 
 ## What it does
 
@@ -12,12 +12,20 @@ A production-grade URL shortener built on AWS, similar to bit.ly. Built in three
 
 ---
 
-## Architecture — V1 (Foundation)
+## Architecture — V2 (Current)
 
+![Architecture V2](docs/architecture_v2.png)
 
-![Architecture](docs/architecture_v1.png)
+### What changed from V1 to V2
 
-
+| | V1 | V2 |
+|---|---|---|
+| Compute | Single EC2 instance | ASG with 2–4 instances |
+| App deployment | Flask via systemd, app.py from S3 | Flask in Docker container from ECR |
+| Scaling | None | CPU-based (70%) + ALB request count (100 req/target) |
+| Self-healing | None — single point of failure | ALB health checks → ASG replaces unhealthy instances |
+| AMI | Public Amazon Linux 2023 | Custom AMI with Docker, SSM Agent, CloudWatch Agent pre-installed |
+| Credentials | systemd EnvironmentFile | `docker run -e` injected from SSM at boot |
 
 ### Components
 
@@ -26,13 +34,15 @@ A production-grade URL shortener built on AWS, similar to bit.ly. Built in three
 | Route53 | Alias A record pointing `app.limonlab.online` to ALB |
 | ACM | TLS certificate for HTTPS — same region as ALB (eu-north-1) |
 | ALB | HTTPS termination, HTTP→HTTPS redirect, health checks |
-| EC2 (t3.micro) | Flask application server in private subnet |
+| ASG | Auto scaling group — min 2, max 4 instances |
+| EC2 | Runs Docker container from custom AMI — private subnet |
+| ECR | Container registry — stores Flask Docker image |
 | RDS PostgreSQL | URL storage in private subnet — never publicly accessible |
-| NAT Gateway | Outbound internet for EC2 (SSM, package installs) |
+| NAT Gateway | Outbound internet for EC2 — ECR image pulls, SSM |
 | SSM Parameter Store | Secure storage for DB credentials — no hardcoded secrets |
-| S3 + Gateway Endpoint | App code storage — traffic stays inside AWS network |
-| CloudWatch | Flask application log shipping from EC2 |
-| IAM Role | Least-privilege EC2 permissions (SSM, S3, CloudWatch) |
+| CloudWatch | Container log collection from EC2, alarms |
+| IAM Role | Least-privilege EC2 permissions (SSM, ECR, CloudWatch) |
+| S3 | Terraform remote state (`use_lockfile = true`) |
 
 ### Security group chain
 
@@ -44,12 +54,20 @@ EC2 has no public IP. RDS has no public access. Only SSM Session Manager for ter
 
 ---
 
+## Architecture — V1 (Foundation)
+
+![Architecture V1](docs/architecture_v1.png)
+
+Single EC2 instance behind ALB. Flask runs directly via systemd. App code fetched from S3 at boot. See `main` branch for V1 code.
+
+---
+
 ## Tech stack
 
 - **Infrastructure:** Terraform (modular file structure, S3 remote state)
 - **Application:** Python 3, Flask, psycopg2
+- **Container:** Docker, Amazon ECR
 - **Database:** PostgreSQL 16 on RDS
-- **CI/CD:** GitHub Actions (V2)
 - **Region:** eu-north-1 (Stockholm)
 
 ---
@@ -58,24 +76,29 @@ EC2 has no public IP. RDS has no public access. Only SSM Session Manager for ter
 
 ```
 url-shortener/
-├── providers.tf
-├── backend.tf
-├── variables.tf
-├── outputs.tf
-├── vpc.tf               # VPC, subnets, IGW, NAT, route tables
-├── security_groups.tf   # ALB, EC2, RDS security groups
-├── alb.tf               # ALB, target group, listeners
-├── acm.tf               # ACM certificate
-├── route53.tf           # DNS records, cert validation
-├── iam.tf               # IAM role, policy attachments, instance profile
-├── ec2.tf               # EC2 instance, user data
-├── rds.tf               # RDS instance, subnet group
-├── ssm.tf               # SSM parameters for DB credentials
-├── s3.tf                # S3 bucket, VPC gateway endpoint
-├── cloudwatch.tf        # Log group with retention policy
-├── user_data.sh         # EC2 bootstrap script
-└── app/
-    └── app.py           # Flask application
+├── app/
+│   ├── app.py              # Flask application
+│   ├── Dockerfile          # Container definition
+│   └── requirements.txt    # Python dependencies
+├── docs/
+│   ├── architecture_v1.png
+│   └── architecture_v2.png
+└── terraform/
+    ├── alb.tf
+    ├── asg.tf
+    ├── backend.tf
+    ├── cloudwatch.tf
+    ├── ec2.tf
+    ├── iam.tf
+    ├── outputs.tf
+    ├── providers.tf
+    ├── rds.tf
+    ├── route53.tf
+    ├── s3.tf
+    ├── security_groups.tf
+    ├── ssm.tf
+    ├── terraform.tfvars
+    └── user_data.sh
 ```
 
 ---
@@ -84,29 +107,34 @@ url-shortener/
 
 ### Prerequisites
 - AWS CLI configured with profile `limonlab`
-- Terraform >= 1.0
-- Domain in Route53
+- Terraform >= 1.10
+- Docker
+- Domain hosted in Route53
+- Custom AMI built with Docker, SSM Agent, CloudWatch Agent installed
+- ECR repository created (`url-shortener`)
 
 ### Steps
 
 ```bash
-# 1. Create S3 bucket first (app.py needs it before EC2 boots)
+# 1. Build and push Docker image to ECR
+cd app
+docker build -t url-shortener .
+aws ecr get-login-password --region eu-north-1 | docker login --username AWS --password-stdin 688600819246.dkr.ecr.eu-north-1.amazonaws.com
+docker tag url-shortener:latest 688600819246.dkr.ecr.eu-north-1.amazonaws.com/url-shortener:latest
+docker push 688600819246.dkr.ecr.eu-north-1.amazonaws.com/url-shortener:latest
+
+# 2. Deploy infrastructure
+cd ../terraform
 terraform init
-terraform apply -target=aws_s3_bucket.project_bucket
-
-# 2. Upload app code
-aws s3 cp app/app.py s3://urlshortener-s3-bucket/app.py --profile limonlab
-
-# 3. Deploy everything
 terraform apply
 ```
 
 ### Required variables (terraform.tfvars)
 
 ```hcl
-ami_id      = "ami-xxxxxxxxx"   # Amazon Linux 2023 in eu-north-1
-db_username = "dbadmin"
-db_password = "yourpassword"
+ami_id        = "ami-xxxxxxxxx"   # Custom AMI ID
+db_username   = "dbadmin"
+db_password   = "yourpassword"
 ```
 
 ---
@@ -123,34 +151,35 @@ curl -X POST https://app.limonlab.online/shorten \
   -d '{"url": "https://www.google.com"}'
 
 # Test redirect — open in browser
-# Copy short_code from response above and visit:
+# Copy short_code from response and visit:
 # https://app.limonlab.online/<short_code>
-# Browser redirects automatically to the original URL
 ```
 
 ---
 
 ## Key lessons learned
 
-- ACM certificate must be in the **same region as ALB** — not us-east-1 (that is only for CloudFront)
-- EC2 `depends_on` NAT Gateway — user data runs at boot and needs outbound internet
-- SSM Parameter Store for secrets — no credentials in code or environment files
-- `CREATE TABLE IF NOT EXISTS` — safe to run on every boot, idempotent
-- S3 Gateway Endpoint — S3 traffic stays inside AWS network, avoids NAT Gateway charges
-- CloudWatch log group defined in Terraform — controls retention, avoids orphaned log groups with no expiry
+- `aws_launch_template` requires `base64encode()` for user_data — unlike `aws_instance`, Terraform does not encode it automatically
+- EC2 uses IAM instance role for AWS CLI authentication — no `--profile` flag needed, credentials fetched from IMDS automatically
+- `health_check_type = "ELB"` is critical — without it ASG won't replace instances where the app is broken but EC2 is still running
+- `desired_capacity` omitted when using scaling policies — avoids Terraform fighting policy-driven scaling on every apply
+- Docker layer order matters — `COPY requirements.txt` + `RUN pip install` before `COPY . .` prevents reinstalling dependencies on every app code change
+- `set -e` in user_data stops the entire script on first error — prevents Docker from running with missing credentials
+- Instance refresh required after user_data changes — existing instances are not affected, only new launches pick up updated user_data
 
 ---
 
 ## Break/fix scenarios completed
 
-| Scenario | How to reproduce | Diagnosis |
-|----------|-----------------|-----------|
-| RDS unreachable | Remove EC2→RDS inbound rule from RDS SG | CloudWatch shows `Connection timed out` on port 5432. ALB returns 504. Fix: restore SG rule. |
+| Scenario | What was broken | What happened | Fix |
+|----------|----------------|---------------|-----|
+| Wrong SSM parameter name | `db_host` → `db_hos` in user_data.sh | `set -e` exited script, Docker never started, ALB marked instance unhealthy, ASG terminated and replaced | Restored correct parameter name, terraform apply, instance refresh |
+| Docker stopped on live instance | `systemctl stop docker && docker.socket` via SSM | Flask container died, ALB health check failed, instance drained and terminated, ASG launched fresh replacement — zero downtime | Self-healed automatically |
 
 ---
 
 ## Versions
 
-- **V1 (current)** — Foundation: Route53/ALB/EC2/RDS/Terraform
-- **V2 (planned)** — ASG, GitHub Actions CI/CD, blue/green deployments
+- **V1** (`main` branch) — Foundation: Route53/ALB/EC2/RDS/Terraform/systemd
+- **V2** (`v2` branch) — Docker, ECR, ASG, auto scaling, self-healing
 - **V3 (planned)** — ECS Fargate, ElastiCache Redis, CloudFront
