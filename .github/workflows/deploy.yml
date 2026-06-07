@@ -1,0 +1,64 @@
+name: Deploy to ECR and EC2
+
+on:
+  push:
+    branches:
+      - v2
+    paths:
+      - 'app/**'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: eu-north-1
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push Docker image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: url-shortener
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG ./app
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+      - name: Deploy to EC2 via SSM Run Command
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: url-shortener
+        run: |
+          aws ssm send-command \
+            --region eu-north-1 \
+            --targets "Key=tag:Name,Values=url-shortener-asg" \
+            --document-name "AWS-RunShellScript" \
+            --parameters commands="[
+              'aws ecr get-login-password --region eu-north-1 | docker login --username AWS --password-stdin $ECR_REGISTRY',
+              'docker pull $ECR_REGISTRY/$ECR_REPOSITORY:latest',
+              'docker stop url-shortener || true',
+              'docker rm url-shortener || true',
+              'docker run -d --name url-shortener --restart always -p 5000:5000 \
+                -e DB_HOST=\$(aws ssm get-parameter --name /url-shortener/db_host --query Parameter.Value --output text --region eu-north-1) \
+                -e DB_NAME=\$(aws ssm get-parameter --name /url-shortener/db_name --query Parameter.Value --output text --region eu-north-1) \
+                -e DB_USER=\$(aws ssm get-parameter --name /url-shortener/db_username --query Parameter.Value --output text --region eu-north-1) \
+                -e DB_PASSWORD=\$(aws ssm get-parameter --name /url-shortener/db_password --query Parameter.Value --with-decryption --output text --region eu-north-1) \
+                -e DB_PORT=\$(aws ssm get-parameter --name /url-shortener/db_port --query Parameter.Value --output text --region eu-north-1) \
+                -e DOMAIN_NAME=\$(aws ssm get-parameter --name /url-shortener/domain_name --query Parameter.Value --output text --region eu-north-1) \
+                $ECR_REGISTRY/$ECR_REPOSITORY:latest'
+            ]"
