@@ -35,7 +35,7 @@ def get_db_connection():
 
 @app.route("/version")
 def version():
-    return jsonify({'version': '2.0', 'deployment': 'CI/CD automated'}), 200
+    return jsonify({'version': '2.0', 'deployent': 'CI/CD automated'}), 200
 
 @app.route("/health")
 def health():
