@@ -69,6 +69,7 @@ Single EC2 instance behind ALB. Flask runs directly via systemd. App code fetche
 - **Container:** Docker, Amazon ECR
 - **Database:** PostgreSQL 16 on RDS
 - **Region:** eu-north-1 (Stockholm)
+- **CI/CD:** GitHub Actions → ECR → SSM Run Command (OIDC authentication)
 
 ---
 
@@ -99,6 +100,9 @@ url-shortener/
     ├── ssm.tf
     ├── terraform.tfvars
     └── user_data.sh
+├── .github/
+    └── workflows/
+       └── deploy.yml      # CI/CD pipeline
 ```
 
 ---
