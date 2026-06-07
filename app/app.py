@@ -33,6 +33,10 @@ def get_db_connection():
         logger.error(f"Database connection failed {e}")
         raise
 
+@app.route("/version")
+def version():
+    return jsonify({'version': '2.0', 'deployment': 'CI/CD automated'}), 200
+
 @app.route("/health")
 def health():
     return jsonify({'status': 'healthy'}), 200
