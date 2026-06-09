@@ -34,17 +34,6 @@ variable "private_subnet_cidrs" {
   default     = ["10.0.3.0/24", "10.0.4.0/24"]
 }
 
-variable "ami_id" {
-  description = "EC2 AMI ID"
-  type        = string
-}
-
-variable "instance_type" {
-  description = "EC2 instance type"
-  type        = string
-  default     = "t3.micro"
-}
-
 variable "db_name" {
   description = "RDS database name"
   type        = string
@@ -75,4 +64,8 @@ variable "azs" {
   description = "Availability zones"
   type        = list(string)
   default     = ["eu-north-1a", "eu-north-1b"]
+}
+variable "ecr_image_url" {
+  description = "Full ECR image URL including tag"
+  type        = string
 }

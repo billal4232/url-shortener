@@ -1,19 +1,16 @@
-name: Deploy to ECR and EC2
-
+name: Deploy to ECR and ECS
 on:
   push:
     branches:
-      - v2
+      - v3
     paths:
       - 'app/**'
-
 jobs:
   deploy:
     runs-on: ubuntu-latest
     permissions:
       id-token: write
       contents: read
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -28,6 +25,9 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
+      # STEP 1: Build new Docker image and push to ECR
+      # Same as V2 — nothing changed here
+      # Image gets two tags: commit SHA (unique) and latest (always points to newest)
       - name: Build and push Docker image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
@@ -39,26 +39,49 @@ jobs:
           docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
 
-      - name: Deploy to EC2 via SSM Run Command
+      - name: Deploy to ECS
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           ECR_REPOSITORY: url-shortener
+          IMAGE_TAG: ${{ github.sha }}
         run: |
-          aws ssm send-command \
+          # STEP 2: Fetch current task definition from AWS as JSON
+          # We need the full task definition so we can modify just the image tag
+          # Everything else (cpu, memory, env vars, ports) stays the same
+          TASK_DEFINITION=$(aws ecs describe-task-definition \
+            --task-definition url-shortener-task \
             --region eu-north-1 \
-            --targets "Key=tag:Name,Values=url-shortener-asg" \
-            --document-name "AWS-RunShellScript" \
-            --parameters commands="[
-              'aws ecr get-login-password --region eu-north-1 | docker login --username AWS --password-stdin $ECR_REGISTRY',
-              'docker pull $ECR_REGISTRY/$ECR_REPOSITORY:latest',
-              'docker stop url-shortener || true',
-              'docker rm url-shortener || true',
-              'docker run -d --name url-shortener --restart always -p 5000:5000 \
-                -e DB_HOST=\$(aws ssm get-parameter --name /url-shortener/db_host --query Parameter.Value --output text --region eu-north-1) \
-                -e DB_NAME=\$(aws ssm get-parameter --name /url-shortener/db_name --query Parameter.Value --output text --region eu-north-1) \
-                -e DB_USER=\$(aws ssm get-parameter --name /url-shortener/db_username --query Parameter.Value --output text --region eu-north-1) \
-                -e DB_PASSWORD=\$(aws ssm get-parameter --name /url-shortener/db_password --query Parameter.Value --with-decryption --output text --region eu-north-1) \
-                -e DB_PORT=\$(aws ssm get-parameter --name /url-shortener/db_port --query Parameter.Value --output text --region eu-north-1) \
-                -e DOMAIN_NAME=\$(aws ssm get-parameter --name /url-shortener/domain_name --query Parameter.Value --output text --region eu-north-1) \
-                $ECR_REGISTRY/$ECR_REPOSITORY:latest'
-            ]"
+            --query 'taskDefinition' \
+            --output json)
+          
+          # STEP 3: Swap old image tag with new commit SHA
+          # Python reads the JSON, finds containerDefinitions[0].image
+          # replaces it with the new image URL containing the new commit SHA
+          # Also strips read-only fields AWS adds (like taskDefinitionArn, revision)
+          # because AWS rejects them when registering a new task definition
+          NEW_TASK_DEFINITION=$(echo $TASK_DEFINITION | python3 -c "
+          import json, sys
+          td = json.load(sys.stdin)
+          td['containerDefinitions'][0]['image'] = '$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG'
+          for key in ['taskDefinitionArn','revision','status','requiresAttributes','compatibilities','registeredAt','registeredBy']:
+              td.pop(key, None)
+          print(json.dumps(td))
+          ")
+          
+          # STEP 4: Register updated task definition as a new revision
+          # AWS creates url-shortener-task:4, :5, :6 etc automatically
+          # Returns the ARN of the new revision
+          NEW_TASK_ARN=$(aws ecs register-task-definition \
+            --region eu-north-1 \
+            --cli-input-json "$NEW_TASK_DEFINITION" \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+          
+          # STEP 5: Tell ECS service to use the new task definition revision
+          # ECS stops old tasks one by one, starts new ones with new image
+          # Rolling deployment — no downtime
+          aws ecs update-service \
+            --region eu-north-1 \
+            --cluster url-shortener-ecs-cluster \
+            --service url-shortener-service \
+            --task-definition $NEW_TASK_ARN

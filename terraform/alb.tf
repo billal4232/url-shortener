@@ -11,7 +11,7 @@ resource "aws_lb" "main" {
 }
 resource "aws_lb_target_group" "alb_tg" {
   name = "${var.project_name}-tg"
-  target_type = "instance"
+  target_type = "ip"
   port        = 5000
   protocol    = "HTTP"
   vpc_id      = aws_vpc.main.id
