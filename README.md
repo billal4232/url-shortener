@@ -1,189 +1,126 @@
-# URL Shortener — Production AWS Infrastructure
+# URL Shortener — AWS Production Platform
 
-A production-grade URL shortener built on AWS, similar to bit.ly. Built in multiple versions as part of a hands-on DevOps portfolio.
+A production-grade URL shortener built on AWS, evolved across three versions from a single EC2 instance to a fully containerized ECS Fargate platform with CloudFront edge delivery and automated CI/CD.
 
-## What it does
-
-- `POST /shorten` — accepts a long URL, generates a 6-character short code, stores in PostgreSQL, returns the short URL
-- `GET /<short_code>` — looks up the short code in the database and redirects the user to the original URL
-- `GET /health` — health check endpoint for ALB
-
-**Live:** `https://app.limonlab.online`
+**Live:** https://app.limonlab.online
 
 ---
 
-## Architecture — V2 (Current)
+## Architecture — V3
 
-![Architecture V2](docs/architecture_v2.png)
-
-### What changed from V1 to V2
-
-| | V1 | V2 |
-|---|---|---|
-| Compute | Single EC2 instance | ASG with 2–4 instances |
-| App deployment | Flask via systemd, app.py from S3 | Flask in Docker container from ECR |
-| Scaling | None | CPU-based (70%) + ALB request count (100 req/target) |
-| Self-healing | None — single point of failure | ALB health checks → ASG replaces unhealthy instances |
-| AMI | Public Amazon Linux 2023 | Custom AMI with Docker, SSM Agent, CloudWatch Agent pre-installed |
-| Credentials | systemd EnvironmentFile | `docker run -e` injected from SSM at boot |
+![Architecture V3](docs/architecture_v3.png)
 
 ### Components
 
-| Component | Purpose |
-|-----------|---------|
-| Route53 | Alias A record pointing `app.limonlab.online` to ALB |
-| ACM | TLS certificate for HTTPS — same region as ALB (eu-north-1) |
-| ALB | HTTPS termination, HTTP→HTTPS redirect, health checks |
-| ASG | Auto scaling group — min 2, max 4 instances |
-| EC2 | Runs Docker container from custom AMI — private subnet |
-| ECR | Container registry — stores Flask Docker image |
-| RDS PostgreSQL | URL storage in private subnet — never publicly accessible |
-| NAT Gateway | Outbound internet for EC2 — ECR image pulls, SSM |
-| SSM Parameter Store | Secure storage for DB credentials — no hardcoded secrets |
-| CloudWatch | Container log collection from EC2, alarms |
-| IAM Role | Least-privilege EC2 permissions (SSM, ECR, CloudWatch) |
-| S3 | Terraform remote state (`use_lockfile = true`) |
-
-### Security group chain
-
-```
-Internet → ALB SG (80/443) → EC2 SG (5000, source: ALB SG only) → RDS SG (5432, source: EC2 SG only)
-```
-
-EC2 has no public IP. RDS has no public access. Only SSM Session Manager for terminal access — no SSH, no bastion host.
+| Layer | Service | Purpose |
+|---|---|---|
+| DNS | Route53 | Routes `app.limonlab.online` to CloudFront |
+| CDN | CloudFront | Global edge delivery, HTTPS termination |
+| Load Balancer | ALB | Distributes traffic across ECS tasks |
+| Compute | ECS Fargate | Runs Flask containers — no EC2 to manage |
+| Container Registry | ECR | Stores Docker images |
+| Database | RDS PostgreSQL | Stores short URL mappings |
+| Certificate | ACM | TLS certificates for ALB and CloudFront |
+| Infrastructure | Terraform | All AWS resources defined as code |
+| CI/CD | GitHub Actions + OIDC | Automated build and ECS deployment |
 
 ---
 
-## Architecture — V1 (Foundation)
+## How It Works
 
-![Architecture V1](docs/architecture_v1.png)
-
-Single EC2 instance behind ALB. Flask runs directly via systemd. App code fetched from S3 at boot. See `main` branch for V1 code.
-
----
-
-## Tech stack
-
-- **Infrastructure:** Terraform (modular file structure, S3 remote state)
-- **Application:** Python 3, Flask, psycopg2
-- **Container:** Docker, Amazon ECR
-- **Database:** PostgreSQL 16 on RDS
-- **Region:** eu-north-1 (Stockholm)
-- **CI/CD:** GitHub Actions → ECR → SSM Run Command (OIDC authentication)
+1. User visits `app.limonlab.online/abc123`
+2. Route53 resolves to CloudFront distribution
+3. CloudFront forwards request to ALB over HTTPS
+4. ALB routes to a healthy ECS Fargate task
+5. Flask queries RDS PostgreSQL for the short code
+6. Returns 301 redirect to the original URL
 
 ---
 
-## Project structure
+## API
 
-```
-url-shortener/
-├── app/
-│   ├── app.py              # Flask application
-│   ├── Dockerfile          # Container definition
-│   └── requirements.txt    # Python dependencies
-├── docs/
-│   ├── architecture_v1.png
-│   └── architecture_v2.png
-└── terraform/
-    ├── alb.tf
-    ├── asg.tf
-    ├── backend.tf
-    ├── cloudwatch.tf
-    ├── ec2.tf
-    ├── iam.tf
-    ├── outputs.tf
-    ├── providers.tf
-    ├── rds.tf
-    ├── route53.tf
-    ├── s3.tf
-    ├── security_groups.tf
-    ├── ssm.tf
-    ├── terraform.tfvars
-    └── user_data.sh
-├── .github/
-    └── workflows/
-       └── deploy.yml      # CI/CD pipeline
-```
-
----
-
-## Deploy
-
-### Prerequisites
-- AWS CLI configured with profile `limonlab`
-- Terraform >= 1.10
-- Docker
-- Domain hosted in Route53
-- Custom AMI built with Docker, SSM Agent, CloudWatch Agent installed
-- ECR repository created (`url-shortener`)
-
-### Steps
-
+**Create a short URL**
 ```bash
-# 1. Build and push Docker image to ECR
-cd app
-docker build -t url-shortener .
-aws ecr get-login-password --region eu-north-1 | docker login --username AWS --password-stdin 688600819246.dkr.ecr.eu-north-1.amazonaws.com
-docker tag url-shortener:latest 688600819246.dkr.ecr.eu-north-1.amazonaws.com/url-shortener:latest
-docker push 688600819246.dkr.ecr.eu-north-1.amazonaws.com/url-shortener:latest
+curl -X POST https://app.limonlab.online/shorten \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com"}'
+```
 
-# 2. Deploy infrastructure
-cd ../terraform
+**Use a short URL**
+```bash
+curl -L https://app.limonlab.online/<short_code>
+```
+
+**Health check**
+```bash
+curl https://app.limonlab.online/health
+```
+
+---
+
+## CI/CD Pipeline
+
+Push to `v3` branch with changes in `app/` triggers GitHub Actions:
+
+1. Build Docker image and push to ECR with commit SHA tag
+2. Fetch current ECS task definition
+3. Update task definition with new image tag — register new revision
+4. Call `ecs update-service` — ECS rolls out new tasks with zero downtime
+
+Authentication uses OIDC — no AWS credentials stored in GitHub secrets.
+
+---
+
+## Infrastructure
+
+All infrastructure is managed by Terraform in the `terraform/` directory.
+
+```
+terraform/
+├── vpc.tf              # VPC, subnets, IGW, NAT Gateway
+├── alb.tf              # Application Load Balancer, listeners, target group
+├── ecs.tf              # ECS cluster, task definition, service
+├── rds.tf              # RDS PostgreSQL instance
+├── iam.tf              # ECS task execution role, task role
+├── security_groups.tf  # ALB, ECS task, RDS security groups
+├── cloudwatch.tf       # Log group for container logs
+├── cloudfront.tf       # CloudFront distribution
+├── acm.tf              # TLS certificates (eu-north-1 + us-east-1)
+├── route53.tf          # DNS records
+└── s3.tf               # Terraform remote state bucket
+```
+
+**Deploy:**
+```bash
+cd terraform
 terraform init
+terraform plan
 terraform apply
 ```
 
-### Required variables (terraform.tfvars)
+---
 
-```hcl
-ami_id        = "ami-xxxxxxxxx"   # Custom AMI ID
-db_username   = "dbadmin"
-db_password   = "yourpassword"
-```
+## Version History
+
+### V1 — Single EC2
+Flask app on a single EC2 instance with RDS PostgreSQL, ALB, HTTPS, Route53, SSM for access. No containers. Infrastructure as code with Terraform.
+
+### V2 — Containerized with ASG
+Flask app Dockerized and deployed via ECR. EC2 Auto Scaling Group (min 2, max 4) with CPU and ALB request count scaling policies. GitHub Actions CI/CD using OIDC — builds image, pushes to ECR, deploys via SSM Run Command.
+
+### V3 — ECS Fargate + CloudFront (current)
+Replaced EC2/ASG with ECS Fargate — no EC2 instances to manage. Added CloudFront in front of ALB for edge delivery. Updated CI/CD to deploy by updating ECS task definition instead of SSM Run Command.
 
 ---
 
-## Test
+## Future Improvements
 
-```bash
-# Health check
-curl https://app.limonlab.online/health
-
-# Shorten a URL
-curl -X POST https://app.limonlab.online/shorten \
-  -H "Content-Type: application/json" \
-  -d '{"url": "https://www.google.com"}'
-
-# Test redirect — open in browser
-# Copy short_code from response and visit:
-# https://app.limonlab.online/<short_code>
-```
+- **Secrets Manager** — move database credentials from environment variables to AWS Secrets Manager for proper secret management
+- **ECS Auto Scaling** — add Application Auto Scaling based on CPU utilization and ALB request count to match V2 scaling behavior
+- **GitHub OIDC role in Terraform** — currently created manually in console; should be managed as infrastructure code
 
 ---
 
-## Key lessons learned
+## Stack
 
-- `aws_launch_template` requires `base64encode()` for user_data — unlike `aws_instance`, Terraform does not encode it automatically
-- EC2 uses IAM instance role for AWS CLI authentication — no `--profile` flag needed, credentials fetched from IMDS automatically
-- `health_check_type = "ELB"` is critical — without it ASG won't replace instances where the app is broken but EC2 is still running
-- `desired_capacity` omitted when using scaling policies — avoids Terraform fighting policy-driven scaling on every apply
-- Docker layer order matters — `COPY requirements.txt` + `RUN pip install` before `COPY . .` prevents reinstalling dependencies on every app code change
-- `set -e` in user_data stops the entire script on first error — prevents Docker from running with missing credentials
-- Instance refresh required after user_data changes — existing instances are not affected, only new launches pick up updated user_data
-
----
-
-## Break/fix scenarios completed
-
-| Scenario | What was broken | What happened | Fix |
-|----------|----------------|---------------|-----|
-| Wrong SSM parameter name | `db_host` → `db_hos` in user_data.sh | `set -e` exited script, Docker never started, ALB marked instance unhealthy, ASG terminated and replaced | Restored correct parameter name, terraform apply, instance refresh |
-| Docker stopped on live instance | `systemctl stop docker && docker.socket` via SSM | Flask container died, ALB health check failed, instance drained and terminated, ASG launched fresh replacement — zero downtime | Self-healed automatically |
-
----
-
-## Versions
-
-- **V1** (`main` branch) — Foundation: Route53/ALB/EC2/RDS/Terraform/systemd
-- **V2** (`v2` branch) — Docker, ECR, ASG, auto scaling, self-healing
-- **V3 (planned)** — ECS Fargate, ElastiCache Redis, CloudFront
+Python · Flask · PostgreSQL · Docker · Terraform · AWS (ECS Fargate · RDS · ALB · CloudFront · ECR · Route53 · ACM · CloudWatch · IAM)
